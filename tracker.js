@@ -548,7 +548,26 @@ window._mrxAddLog = async function(pid) {
   _mrxRender();
 };
 
-// ── FETCH TODAY'S APPOINTMENTS ────────────────────────────────────────────────
+// ── FETCH CALENDAR APPOINTMENTS (shared extractor) ───────────────────────────
+const CANCELLED_STATUSES = new Set(['CANCELLED', 'CANCELED', 'NO_SHOW', 'NOSHOW', 'NO SHOW', 'LATE_CANCEL', 'LATE CANCEL', 'MISSED']);
+// extractActiveOnly=true skips cancelled/no-show appointments
+function _extractCalendarIds(j, extractActiveOnly) {
+  const ids = new Set();
+  function extractAppointments(obj) {
+    if (!obj || typeof obj !== 'object') return;
+    if (Array.isArray(obj)) { obj.forEach(extractAppointments); return; }
+    // If this looks like an appointment object, check its status before extracting patient
+    const status = (obj.status || obj.appointment_status || obj.appointmentStatus || '').toString().toUpperCase().replace(/[- ]/g, '_');
+    const isCancelled = extractActiveOnly && CANCELLED_STATUSES.has(status);
+    if (!isCancelled) {
+      if (obj.patient_id) ids.add(String(obj.patient_id));
+      if (obj.patientId) ids.add(String(obj.patientId));
+    }
+    Object.values(obj).forEach(v => { if (v && typeof v === 'object') extractAppointments(v); });
+  }
+  extractAppointments(j);
+  return ids;
+}
 async function fetchTodayAppointments(h) {
   const today = new Date().toISOString().split('T')[0];
   const startDate = today + 'T07:00:00.000Z';
@@ -558,19 +577,26 @@ async function fetchTodayAppointments(h) {
   try {
     const r = await fetch(url, { headers: h });
     if (!r.ok) return new Set();
-    const j = await r.json();
-    const ids = new Set();
-    function extract(obj) {
-      if (!obj || typeof obj !== 'object') return;
-      if (Array.isArray(obj)) { obj.forEach(extract); return; }
-      if (obj.patient_id) ids.add(String(obj.patient_id));
-      if (obj.patientId) ids.add(String(obj.patientId));
-      Object.values(obj).forEach(v => { if (v && typeof v === 'object') extract(v); });
-    }
-    extract(j);
-    return ids;
+    return _extractCalendarIds(await r.json(), true); // active (non-cancelled) only
   } catch(e) {
-    console.warn('[POC Tracker] Calendar API error:', e.message);
+    console.warn('[POC Tracker] Calendar API (today) error:', e.message);
+    return new Set();
+  }
+}
+// Returns patient IDs who have at least one appointment scheduled AFTER today
+async function fetchFutureAppointments(h) {
+  const tomorrow = new Date(Date.now() + 864e5).toISOString().split('T')[0];
+  const ninetyDays = new Date(Date.now() + 90 * 864e5).toISOString().split('T')[0];
+  const startDate = tomorrow + 'T00:00:00.000Z';
+  const endDate = ninetyDays + 'T23:59:59.999Z';
+  const doctorParam = DOCTOR_IDS.join(',');
+  const url = `/apis/v1/appointment/calendar/events?end_date=${endDate}&page=1&size=1000&start_date=${startDate}&doctor_id=${doctorParam}&clinic_id=${CLINIC}&practice_id=${PRACTICE_ID}`;
+  try {
+    const r = await fetch(url, { headers: h });
+    if (!r.ok) return new Set();
+    return _extractCalendarIds(await r.json(), true); // active (non-cancelled) only
+  } catch(e) {
+    console.warn('[POC Tracker] Calendar API (future) error:', e.message);
     return new Set();
   }
 }
@@ -619,9 +645,12 @@ window._mrxLoad = async function(silent) {
     }
     const pocData = Object.values(pocMap);
 
-    // ── STEP 3: Today's appointments ─────────────────────────────────────────
+    // ── STEP 3: Today's appointments + future booked check ───────────────────
     if (!silent) setStatus('Loading today\'s schedule…');
-    const todayApptPids = await fetchTodayAppointments(h);
+    const [todayApptPids, futureApptPids] = await Promise.all([
+      fetchTodayAppointments(h),
+      fetchFutureAppointments(h),
+    ]);
 
     // ── STEP 4: Faxes ─────────────────────────────────────────────────────────
     if (!silent) setStatus('Loading fax records…');
@@ -689,12 +718,13 @@ window._mrxLoad = async function(silent) {
       const rx_missing = isMedPat && rx_pending;
       const one_appt_left = oneApptPids.has(pid);
       const has_today_appt = todayApptPids.has(pid);
-      // KEY: today_sched_alert = patient is in clinic TODAY + only 1 appointment left
-      const today_sched_alert = has_today_appt && one_appt_left;
+      const has_future_booked = futureApptPids.has(pid);
+      // Book Today: in clinic today (not cancelled) + no future appointments already scheduled
+      const today_sched_alert = has_today_appt && !has_future_booked;
       const at_risk = daysSinceAppt !== null && daysSinceAppt <= 30 && (assessed.risk === 'non_compliant' || assessed.risk === 'expired');
       const no_future_appt = !one_appt_left && daysSinceAppt !== null && daysSinceAppt > 60;
       const sched_priority = no_future_appt ? 1 : one_appt_left ? 2 : 3;
-      return { ...p, ...Object.assign({}, assessed), fax_count: faxRecs.length, latest_fax_certified: lat?.is_poc_certified||false, fax_records: faxRecs.slice(0,5), has_today_appt, has_future_appt: one_appt_left ? true : null, today_sched_alert, one_appt_left, at_risk, no_future_appt, days_since_appt: daysSinceAppt, activity_status: no_future_appt ? 'inactive' : one_appt_left ? 'scheduled' : 'recent', log_count: 0, fot_pending, fot_name, rx_pending, rx_missing, sched_priority };
+      return { ...p, ...Object.assign({}, assessed), fax_count: faxRecs.length, latest_fax_certified: lat?.is_poc_certified||false, fax_records: faxRecs.slice(0,5), has_today_appt, has_future_appt: has_future_booked, today_sched_alert, one_appt_left, at_risk, no_future_appt, days_since_appt: daysSinceAppt, activity_status: no_future_appt ? 'inactive' : has_future_booked ? 'scheduled' : 'recent', log_count: 0, fot_pending, fot_name, rx_pending, rx_missing, sched_priority };
     });
 
     const ts = document.getElementById('_mrxts');
@@ -707,5 +737,5 @@ window._mrxLoad = async function(silent) {
   }
   if (refBtn) refBtn.disabled = false;
 };
-console.log('[POC Tracker v14] Today-only Schedule Alert + desktop notifications + auto-refresh');
+console.log('[POC Tracker v15] Book Today: active today appt + no future bookings. Cancelled appointments excluded.');
 })();
