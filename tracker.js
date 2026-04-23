@@ -548,57 +548,52 @@ window._mrxAddLog = async function(pid) {
   _mrxRender();
 };
 
-// ── FETCH CALENDAR APPOINTMENTS (shared extractor) ───────────────────────────
-const CANCELLED_STATUSES = new Set(['CANCELLED', 'CANCELED', 'NO_SHOW', 'NOSHOW', 'NO SHOW', 'LATE_CANCEL', 'LATE CANCEL', 'MISSED']);
-// extractActiveOnly=true skips cancelled/no-show appointments
-function _extractCalendarIds(j, extractActiveOnly) {
+// ── FETCH CALENDAR APPOINTMENTS ───────────────────────────────────────────────
+// Spry response: { data: { content: [ { status, calendar_event_type, patient: { patient_id } } ] } }
+const CANCELLED_STATUSES = new Set(['CANCELLED','CANCELED','NO_SHOW','NOSHOW','LATE_CANCEL','MISSED']);
+function _extractApptIds(j, activeOnly) {
   const ids = new Set();
-  function extractAppointments(obj) {
-    if (!obj || typeof obj !== 'object') return;
-    if (Array.isArray(obj)) { obj.forEach(extractAppointments); return; }
-    // If this looks like an appointment object, check its status before extracting patient
-    const status = (obj.status || obj.appointment_status || obj.appointmentStatus || '').toString().toUpperCase().replace(/[- ]/g, '_');
-    const isCancelled = extractActiveOnly && CANCELLED_STATUSES.has(status);
-    if (!isCancelled) {
-      if (obj.patient_id) ids.add(String(obj.patient_id));
-      if (obj.patientId) ids.add(String(obj.patientId));
-    }
-    Object.values(obj).forEach(v => { if (v && typeof v === 'object') extractAppointments(v); });
-  }
-  extractAppointments(j);
+  const appts = j?.data?.content || [];
+  appts.forEach(a => {
+    if (a.calendar_event_type !== 'APPOINTMENT') return; // skip DOCTOR_BLOCK etc.
+    if (activeOnly && CANCELLED_STATUSES.has((a.status||'').toUpperCase())) return;
+    const pid = a.patient?.patient_id;
+    if (pid) ids.add(String(pid));
+  });
   return ids;
 }
 async function fetchTodayAppointments(h) {
   const today = new Date().toISOString().split('T')[0];
-  const startDate = today + 'T07:00:00.000Z';
-  const endDate = today + 'T23:59:59.999Z';
-  const doctorParam = DOCTOR_IDS.join(',');
-  const url = `/apis/v1/appointment/calendar/events?end_date=${endDate}&page=1&size=300&start_date=${startDate}&doctor_id=${doctorParam}&clinic_id=${CLINIC}&practice_id=${PRACTICE_ID}`;
+  const url = `/apis/v1/appointment/calendar/events?end_date=${today}T23:59:59.999Z&page=1&size=300&start_date=${today}T07:00:00.000Z&doctor_id=${DOCTOR_IDS.join(',')}&clinic_id=${CLINIC}&practice_id=${PRACTICE_ID}`;
   try {
     const r = await fetch(url, { headers: h });
     if (!r.ok) return new Set();
-    return _extractCalendarIds(await r.json(), true); // active (non-cancelled) only
+    return _extractApptIds(await r.json(), true); // active (non-cancelled) only
   } catch(e) {
     console.warn('[POC Tracker] Calendar API (today) error:', e.message);
     return new Set();
   }
 }
-// Returns patient IDs who have at least one appointment scheduled AFTER today
+// Returns patient IDs who have at least one non-cancelled appointment AFTER today (paginated)
 async function fetchFutureAppointments(h) {
   const tomorrow = new Date(Date.now() + 864e5).toISOString().split('T')[0];
   const ninetyDays = new Date(Date.now() + 90 * 864e5).toISOString().split('T')[0];
-  const startDate = tomorrow + 'T00:00:00.000Z';
-  const endDate = ninetyDays + 'T23:59:59.999Z';
-  const doctorParam = DOCTOR_IDS.join(',');
-  const url = `/apis/v1/appointment/calendar/events?end_date=${endDate}&page=1&size=1000&start_date=${startDate}&doctor_id=${doctorParam}&clinic_id=${CLINIC}&practice_id=${PRACTICE_ID}`;
+  const base = `/apis/v1/appointment/calendar/events?end_date=${ninetyDays}T23:59:59.999Z&size=1000&start_date=${tomorrow}T00:00:00.000Z&doctor_id=${DOCTOR_IDS.join(',')}&clinic_id=${CLINIC}&practice_id=${PRACTICE_ID}`;
+  const ids = new Set();
   try {
-    const r = await fetch(url, { headers: h });
-    if (!r.ok) return new Set();
-    return _extractCalendarIds(await r.json(), true); // active (non-cancelled) only
+    let page = 1, totalPages = 1;
+    while (page <= totalPages) {
+      const r = await fetch(`${base}&page=${page}`, { headers: h });
+      if (!r.ok) break;
+      const j = await r.json();
+      totalPages = j?.data?.pages || 1;
+      _extractApptIds(j, true).forEach(id => ids.add(id));
+      page++;
+    }
   } catch(e) {
     console.warn('[POC Tracker] Calendar API (future) error:', e.message);
-    return new Set();
   }
+  return ids;
 }
 
 // ── DATA LOADING ──────────────────────────────────────────────────────────────
@@ -737,5 +732,5 @@ window._mrxLoad = async function(silent) {
   }
   if (refBtn) refBtn.disabled = false;
 };
-console.log('[POC Tracker v15] Book Today: active today appt + no future bookings. Cancelled appointments excluded.');
+console.log('[POC Tracker v15] Book Today: active today appt (excl. cancelled) + no future bookings (paginated, 90-day window).');
 })();
