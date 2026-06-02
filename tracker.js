@@ -224,6 +224,7 @@ overlay.innerHTML = `
     <div class="_mm" id="_mrxme" onclick="_mrxFilter('non_compliant')"><div class="_mmv" style="color:#7F1D1D;font-size:14px" id="_mrxvnc">—</div><div class="_mml">Non-Comp</div></div>
     <div class="_mm" id="_mrxmexp" onclick="_mrxFilter('expired')"><div class="_mmv mr" id="_mrxve">—</div><div class="_mml">Expired</div></div>
     <div class="_mm" id="_mrxmc" onclick="_mrxFilter('recert_due')"><div class="_mmv mo" id="_mrxvc">—</div><div class="_mml">Recert Due</div></div>
+    <div class="_mm" id="_mrxmcr" onclick="_mrxFilter('created')" style="border:1px solid #FCD34D;background:#FFFBEB"><div class="_mmv" style="color:#92400E;font-size:14px" id="_mrxvcr">—</div><div class="_mml" style="color:#92400E">Pending Cert</div></div>
     <div class="_mm" id="_mrxmk" onclick="_mrxFilter('certified')"><div class="_mmv mg" id="_mrxvk">—</div><div class="_mml">Certified</div></div>
     <div class="_mm" id="_mrxmns" onclick="_mrxFilter('today_alert')" style="grid-column:span 2;border:2px solid #F97316;background:#FFF7ED"><div class="_mmv" style="color:#C2410C;font-size:14px;font-weight:800" id="_mrxvns">—</div><div class="_mml" style="color:#C2410C;font-weight:600">📅 Book Today</div></div>
     <div class="_mm" id="_mrxmna" onclick="_mrxFilter('no_future_appt')"><div class="_mmv" style="color:#6B21A8;font-size:14px" id="_mrxvna">—</div><div class="_mml">No Appt</div></div>
@@ -246,6 +247,7 @@ overlay.innerHTML = `
       <button class="_mft on" onclick="_mrxTab('all',this)">All</button>
       <button class="_mft" onclick="_mrxTab('non_compliant',this)">Non-comp</button>
       <button class="_mft" onclick="_mrxTab('expired',this)">Exp</button>
+      <button class="_mft" onclick="_mrxTab('created',this)" style="color:#92400E">Pending Cert</button>
       <button class="_mft" onclick="_mrxTab('today_alert',this)" style="color:#C2410C;font-weight:600">Book Today</button>
       <button class="_mft" onclick="_mrxTab('one_appt_left',this)">1 Appt Left</button>
       <button class="_mft" onclick="_mrxTab('no_future_appt',this)">No Appt</button>
@@ -312,11 +314,12 @@ function _mrxAssess(p) {
         if (isNonCompliant()) return { risk: 'non_compliant', label: '⚠ Non-compliant', dl };
         return { risk: 'expired', label: 'Cert expired ' + Math.abs(dl) + 'd ago', dl };
       }
-      if (dl !== null && dl <= warningDays) return { risk: s === 'CREATED' ? 'created' : 'recert_due', label: (s === 'CREATED' ? 'Urgent — ' : 'Recert due ') + dl + 'd', dl };
+      if (s === 'CREATED') return { risk: 'created', label: dl !== null && dl <= warningDays ? 'Awaiting signature — ' + dl + 'd left' : 'Awaiting physician signature', dl };
+      if (dl !== null && dl <= warningDays) return { risk: 'recert_due', label: 'Recert due ' + dl + 'd', dl };
       if (dl !== null && dl <= 30 && (insType === 'medicare' || insType === 'medicare_adv')) return { risk: 'recert_due', label: 'Medicare recert ' + dl + 'd', dl };
-      return s === 'CREATED' ? { risk: 'created', label: 'Awaiting cert', dl } : { risk: 'certified', label: 'Certified', dl };
+      return s === 'CREATED' ? { risk: 'created', label: 'Awaiting physician signature', dl } : { risk: 'certified', label: 'Certified', dl };
     }
-    return s === 'CREATED' ? { risk: 'created', label: 'Awaiting cert', dl: null } : { risk: 'certified', label: 'Certified', dl: null };
+    return s === 'CREATED' ? { risk: 'created', label: 'Awaiting physician signature', dl: null } : { risk: 'certified', label: 'Certified', dl: null };
   }
   return { risk: 'none', label: s, dl: null };
 }
@@ -344,7 +347,8 @@ window._mrxRender = function() {
   const _set = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
   _set('_mrxvnc', data.filter(p => p.risk === 'non_compliant').length);
   _set('_mrxve', data.filter(p => p.risk === 'expired').length);
-  _set('_mrxvc', data.filter(p => p.risk === 'recert_due' || p.risk === 'created').length);
+  _set('_mrxvc', data.filter(p => p.risk === 'recert_due').length);
+  _set('_mrxvcr', data.filter(p => p.risk === 'created').length);
   _set('_mrxvk', data.filter(p => p.risk === 'certified').length);
   const todayCount = data.filter(p => p.today_sched_alert).length;
   _set('_mrxvns', todayCount);
@@ -369,7 +373,8 @@ window._mrxRender = function() {
     if (insFilter && p.ins_type !== insFilter) return false;
     if (flt === 'non_compliant') return p.risk === 'non_compliant';
     if (flt === 'expired') return p.risk === 'expired';
-    if (flt === 'recert_due') return p.risk === 'recert_due' || p.risk === 'created';
+    if (flt === 'recert_due') return p.risk === 'recert_due';
+    if (flt === 'created') return p.risk === 'created';
     if (flt === 'certified') return p.risk === 'certified';
     if (flt === 'today_alert') return p.today_sched_alert === true;
     if (flt === 'one_appt_left') return p.one_appt_left === true;
@@ -437,6 +442,7 @@ window._mrxDet = async function(id, silent) {
     ? p.fax_records.slice(0,3).map(f => `<div style="display:flex;gap:8px;padding:5px 0;border-bottom:1px solid #EFEDE8;font-size:11px"><div style="width:7px;height:7px;border-radius:50%;background:${f.is_poc_certified?'#1A6B3A':'#B85A00'};flex-shrink:0;margin-top:3px"></div><div><div style="font-weight:600">${_mrxFmt(f.received_date)} · ${f.is_poc_certified?'<span style="color:#1A6B3A">Certified ✓</span>':'Unsigned'}</div>${f.referring_physician?`<div style="color:#6B6760">${f.referring_physician}</div>`:''}</div></div>`).join('')
     : '<div style="color:#9E9A94;font-size:11px;padding:4px 0">No fax records</div>';
   const medicareBanner = isMedicare ? `<div class="_mrule">📋 <strong>Medicare rules apply</strong> · ${certWindow}-day cert window · Rx required</div>` : '';
+  const pendingCertBanner = p.risk === 'created' ? `<div style="background:#FFFBEB;border:2px solid #FCD34D;border-radius:6px;padding:8px 12px;font-size:12px;color:#92400E;font-weight:600;margin:8px 12px">✏️ UNSIGNED POC — Sent to referring physician but not yet signed. Follow up immediately.</div>` : '';
   const ncBanner = p.risk === 'non_compliant' ? `<div class="_mnc-banner">⚠ NON-COMPLIANT — Patient attending with expired POC. Immediate action required.</div>` : '';
   const todayBanner = p.today_sched_alert ? `<div style="background:#FEF2F2;border:2px solid #C13535;border-radius:6px;padding:8px 12px;font-size:12px;color:#C13535;font-weight:700;margin:8px 12px;display:flex;align-items:center;gap:6px;animation:_mrx_pulse_red 1.5s infinite">📅 BOOK BEFORE THEY LEAVE — Last appointment is today</div>` : (p.one_appt_left ? `<div style="background:#FFF7ED;border:1px solid #F97316;border-radius:6px;padding:8px 12px;font-size:12px;color:#C2410C;font-weight:600;margin:8px 12px">📅 1 appointment left — book next block soon</div>` : '');
   const atRiskBanner = p.at_risk ? `<div style="background:#FEF2F2;border:1px solid #FECACA;border-radius:6px;padding:6px 12px;font-size:11px;color:#7F1D1D;font-weight:600;margin:4px 12px">⚠ COMPLIANCE RISK — Has upcoming appointment with expired/invalid POC</div>` : '';
@@ -455,7 +461,7 @@ window._mrxDet = async function(id, silent) {
       </div>
       <button class="_mc" onclick="_mrxCloseDet()">✕</button>
     </div>
-    ${todayBanner}${ncBanner}${atRiskBanner}${fotBanner}${rxBanner}${medicareBanner}
+    ${todayBanner}${pendingCertBanner}${ncBanner}${atRiskBanner}${fotBanner}${rxBanner}${medicareBanner}
     <div class="_mdc2">
       <div class="_mdcol">
         <div class="_mdct">POC</div>
@@ -716,7 +722,7 @@ window._mrxLoad = async function(silent) {
       const has_future_booked = futureApptPids.has(pid);
       // Book Today: in clinic today (not cancelled) + no future appointments already scheduled
       const today_sched_alert = has_today_appt && !has_future_booked;
-      const at_risk = daysSinceAppt !== null && daysSinceAppt <= 30 && (assessed.risk === 'non_compliant' || assessed.risk === 'expired');
+      const at_risk = daysSinceAppt !== null && daysSinceAppt <= 30 && (assessed.risk === 'non_compliant' || assessed.risk === 'expired' || assessed.risk === 'created');
       const no_future_appt = !one_appt_left && daysSinceAppt !== null && daysSinceAppt > 60;
       const sched_priority = no_future_appt ? 1 : one_appt_left ? 2 : 3;
       return { ...p, ...Object.assign({}, assessed), fax_count: faxRecs.length, latest_fax_certified: lat?.is_poc_certified||false, fax_records: faxRecs.slice(0,5), has_today_appt, has_future_appt: has_future_booked, today_sched_alert, one_appt_left, at_risk, no_future_appt, days_since_appt: daysSinceAppt, activity_status: no_future_appt ? 'inactive' : has_future_booked ? 'scheduled' : 'recent', log_count: 0, fot_pending, fot_name, rx_pending, rx_missing, sched_priority };
