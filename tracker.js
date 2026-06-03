@@ -291,36 +291,107 @@ if (Notification.permission === 'granted') {
 
 // ── RISK ASSESSMENT ───────────────────────────────────────────────────────────
 function _mrxAssess(p) {
-  const s = p.poc_status, e = p.poc_expiration_date, lastAppt = p.last_appt;
+  const s = p.poc_status;
+  const e = p.poc_expiration_date;        // cert end date
+  const c = p.poc_created_at;             // date POC was created in Spry
+  const lastAppt = p.last_appt;
   const insType = p.ins_type || 'commercial';
-  const warningDays = insType === 'medicare' || insType === 'medicare_adv' ? 10 : 14;
+  const isMedicare = insType === 'medicare' || insType === 'medicare_adv';
+
+  // Days from now until a date (negative = past)
   const dfl = d => d ? Math.round((new Date(d) - new Date()) / 864e5) : null;
+  // Days from a date until now (positive = days ago)
   const dag = d => d ? Math.round((new Date() - new Date(d)) / 864e5) : null;
+
+  // ── RULE THRESHOLDS ────────────────────────────────────────────────────────
+  // Medicare: warn 10 days before expiry; others: 14 days
+  const warningDays = isMedicare ? 10 : 14;
+  // Medicare Rule 1: physician must sign within 30 days of POC creation
+  const SIGNING_DEADLINE_DAYS = 30;
+
+  // ── HELPER: Is patient being treated without valid cert? ──────────────────
+  // "Non-compliant" = POC is expired/invalid AND patient was seen in last 30d
   const isNonCompliant = () => {
-    if (s !== 'EXPIRED' && !(s === 'CERTIFIED' && dfl(e) !== null && dfl(e) <= 0)) return false;
+    const certExpired = s === 'EXPIRED' || (s === 'CERTIFIED' && dfl(e) !== null && dfl(e) <= 0);
+    if (!certExpired) return false;
     if (!lastAppt) return false;
     return (dag(lastAppt) || 0) <= 30;
   };
+
+  // ── HELPER: Approximate plan exceeded? ───────────────────────────────────
+  // Rule 3: if POC has defined weeks/frequency and cert period has been fully
+  // used, flag as plan exceeded. We detect this by checking if last appt is
+  // past the cert end date — meaning treatment continued beyond certified plan.
+  const planExceeded = () => {
+    if (!e || !lastAppt) return false;
+    const certEnd = new Date(e);
+    const lastSeen = new Date(lastAppt);
+    // If patient was seen after cert expiry, they were treated outside the plan
+    return lastSeen > certEnd;
+  };
+
+  // ── NO POC ON FILE ────────────────────────────────────────────────────────
   if (!s) return { risk: 'none', label: 'No POC on file', dl: null };
+
+  // ── EXPIRED STATUS ────────────────────────────────────────────────────────
   if (s === 'EXPIRED') {
     const da = dag(e);
-    if (isNonCompliant()) return { risk: 'non_compliant', label: '⚠ Non-compliant', dl: da ? -da : null };
-    return { risk: 'expired', label: 'Expired' + (da !== null ? ' ' + da + 'd ago' : ''), dl: da ? -da : null };
+    if (planExceeded()) return { risk: 'non_compliant', label: '⚠ Plan exceeded — treated outside cert', dl: da ? -da : null };
+    if (isNonCompliant()) return { risk: 'non_compliant', label: '⚠ Non-compliant — treated without valid cert', dl: da ? -da : null };
+    return { risk: 'expired', label: 'Expired ' + (da !== null ? da + 'd ago' : ''), dl: da ? -da : null };
   }
-  if (s === 'CERTIFIED' || s === 'CREATED') {
+
+  // ── CERTIFIED STATUS ──────────────────────────────────────────────────────
+  if (s === 'CERTIFIED') {
     if (e) {
       const dl = dfl(e);
+      // Cert is past its end date
       if (dl !== null && dl <= 0) {
-        if (isNonCompliant()) return { risk: 'non_compliant', label: '⚠ Non-compliant', dl };
+        if (planExceeded()) return { risk: 'non_compliant', label: '⚠ Plan exceeded — treated outside cert', dl };
+        if (isNonCompliant()) return { risk: 'non_compliant', label: '⚠ Non-compliant — treated without valid cert', dl };
         return { risk: 'expired', label: 'Cert expired ' + Math.abs(dl) + 'd ago', dl };
       }
-      if (s === 'CREATED') return { risk: 'created', label: dl !== null && dl <= warningDays ? 'Awaiting signature — ' + dl + 'd left' : 'Awaiting physician signature', dl };
-      if (dl !== null && dl <= warningDays) return { risk: 'recert_due', label: 'Recert due ' + dl + 'd', dl };
-      if (dl !== null && dl <= 30 && (insType === 'medicare' || insType === 'medicare_adv')) return { risk: 'recert_due', label: 'Medicare recert ' + dl + 'd', dl };
-      return s === 'CREATED' ? { risk: 'created', label: 'Awaiting physician signature', dl } : { risk: 'certified', label: 'Certified', dl };
+      // Cert is active but approaching expiry
+      if (dl !== null && dl <= warningDays) return { risk: 'recert_due', label: 'Recert due — ' + dl + 'd left', dl };
+      // Extended Medicare warning: flag at 30 days for Medicare patients
+      if (dl !== null && dl <= 30 && isMedicare) return { risk: 'recert_due', label: 'Medicare recert due — ' + dl + 'd left', dl };
+      return { risk: 'certified', label: 'Certified', dl };
     }
-    return s === 'CREATED' ? { risk: 'created', label: 'Awaiting physician signature', dl: null } : { risk: 'certified', label: 'Certified', dl: null };
+    // Certified but no expiry date — treat as certified
+    return { risk: 'certified', label: 'Certified', dl: null };
   }
+
+  // ── CREATED STATUS (POC sent, awaiting physician signature) ──────────────
+  if (s === 'CREATED') {
+    const dl = dfl(e);
+    const daysSinceCreated = dag(c);
+
+    // RULE 1 (Medicare): If unsigned for > 30 days, flag as compliance risk
+    // Treatment may have started; physician must sign within 30 days of creation
+    if (isMedicare && daysSinceCreated !== null && daysSinceCreated > SIGNING_DEADLINE_DAYS) {
+      return {
+        risk: 'non_compliant',
+        label: '⚠ Unsigned ' + daysSinceCreated + 'd — 30-day signing deadline exceeded',
+        dl: dl
+      };
+    }
+
+    // Cert expiry passed while still unsigned — treated without valid cert
+    if (dl !== null && dl <= 0) {
+      if (isNonCompliant()) return { risk: 'non_compliant', label: '⚠ Unsigned & expired — treated without valid cert', dl };
+      return { risk: 'expired', label: 'Cert period passed — still unsigned', dl };
+    }
+
+    // Approaching expiry while unsigned — urgent
+    if (dl !== null && dl <= warningDays) {
+      return { risk: 'created', label: 'Unsigned — ' + dl + 'd until expiry', dl };
+    }
+
+    // Standard pending state
+    const daysNote = daysSinceCreated !== null ? ' (' + daysSinceCreated + 'd ago)' : '';
+    return { risk: 'created', label: 'Awaiting physician signature' + daysNote, dl };
+  }
+
   return { risk: 'none', label: s, dl: null };
 }
 
@@ -738,5 +809,5 @@ window._mrxLoad = async function(silent) {
   }
   if (refBtn) refBtn.disabled = false;
 };
-console.log('[POC Tracker v15] Book Today: active today appt (excl. cancelled) + no future bookings (paginated, 90-day window).');
+console.log('[POC Tracker v16] Book Today: active today appt (excl. cancelled) + no future bookings (paginated, 90-day window).');
 })();
